@@ -190,10 +190,15 @@ int main(int argc, char* argv[]) {
     }
 
     double end_time = MPI_Wtime();
+    double elapsed_time = end_time - start_time;
+
+    // Reduce timing to find maximum elapsed time
+    double max_time;
+    MPI_Reduce(&elapsed_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         outputResults(results);
-        std::cout << "Total simulation time: " << end_time - start_time << " seconds.\n";
+        std::cout << "Maximum simulation time across all processes: " << max_time << " seconds.\n";
 
         for (int day = 0; day <= SIMULATION_DAYS; ++day) {
             for (int i = 0; i < ROWS; ++i) {
