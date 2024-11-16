@@ -29,7 +29,19 @@ bool readSettings(const std::string& filename) {
         std::cerr << "Error opening " << filename << "\n";
         return false;
     }
-    file >> ROWS >> COLS >> ALPHA >> BETA >> OMEGA >> SIMULATION_DAYS;
+    char label[50];
+    if (file >> label >> ROWS &&
+        file >> label >> COLS &&
+        file >> label >> ALPHA &&
+        file >> label >> BETA &&
+        file >> label >> OMEGA &&
+        file >> label >> SIMULATION_DAYS) {
+        std::cout << "Values read in successfully.\n";
+        
+    }
+    else {
+        std::cerr << "Error reading settings file.\n";
+    }
     file.close();
     return true;
 }

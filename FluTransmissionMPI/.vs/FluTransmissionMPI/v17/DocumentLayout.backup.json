@@ -1,0 +1,37 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\zackz\\GitHub\\FluTransmissionMPI\\FluTransmissionMPI\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{DE3986F4-16E3-43FF-BA5B-093A23F2DEED}|FluTransmissionMPI.vcxproj|C:\\Users\\zackz\\GitHub\\FluTransmissionMPI\\FluTransmissionMPI\\FluTransmissionMPI.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{DE3986F4-16E3-43FF-BA5B-093A23F2DEED}|FluTransmissionMPI.vcxproj|solutionrelative:FluTransmissionMPI.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "FluTransmissionMPI.cpp",
+              "DocumentMoniker": "C:\\Users\\zackz\\GitHub\\FluTransmissionMPI\\FluTransmissionMPI\\FluTransmissionMPI.cpp",
+              "RelativeDocumentMoniker": "FluTransmissionMPI.cpp",
+              "ToolTip": "C:\\Users\\zackz\\GitHub\\FluTransmissionMPI\\FluTransmissionMPI\\FluTransmissionMPI.cpp",
+              "RelativeToolTip": "FluTransmissionMPI.cpp",
+              "ViewState": "AgIAAMIAAAAAAAAAAAAQwNIAAAAUAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
+              "WhenOpened": "2024-11-12T21:10:49.694Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
