@@ -1,6 +1,6 @@
-900
-900
-0.1
-0.3
-3
-30
+gridHeight: 900
+gridWidth: 900
+alpha: 0.5
+beta: 1
+omega: 4
+numDays: 20

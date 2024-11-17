@@ -1,234 +1,268 @@
-#include <mpi.h>
 #include <iostream>
 #include <fstream>
+#include <mpi.h>
 
-// Parameters with default values
-int ROWS;
-int COLS;
-double ALPHA;
-double BETA;
-int OMEGA;
-int SIMULATION_DAYS;
+// Default values for simulation settings
+int gridHeight = 5;
+int gridWidth = 5;
+double alpha = 0.1;
+double beta = 0.3;
+int omega = 2;
+int numDays = 5;
 
-struct Person {
-    bool sick;
-    int sick_days;
-    bool recovered;
-    Person() : sick(false), sick_days(0), recovered(false) {}
+class Person {
+public:
+    // Use int64_t to handle much larger values safely
+    int64_t state;  // Higher bits for was_infected, lower bits for sick_days
+    Person() : state(0) {}
 };
 
-unsigned int simpleRand(unsigned int seed) {
-    seed = (seed * 1103515245 + 12345) % 2147483648;
-    return seed;
-}
-
-// Read parameters from settings.txt
-bool readSettings(const std::string& filename) {
+void readSettingsFromFile(const char* filename) {
     std::ifstream file(filename);
-    if (!file) {
-        std::cerr << "Error opening " << filename << "\n";
-        return false;
+    if (!file.is_open()) {
+        std::cerr << "Could not open settings file.\n";
+        return;
     }
+
     char label[50];
-    if (file >> label >> ROWS &&
-        file >> label >> COLS &&
-        file >> label >> ALPHA &&
-        file >> label >> BETA &&
-        file >> label >> OMEGA &&
-        file >> label >> SIMULATION_DAYS) {
-        std::cout << "Values read in successfully.\n";
-        
+    if (file >> label >> gridHeight >>
+        label >> gridWidth >>
+        label >> alpha >>
+        label >> beta >>
+        label >> omega >>
+        label >> numDays) {
     }
     else {
         std::cerr << "Error reading settings file.\n";
     }
     file.close();
-    return true;
 }
 
-// Initialize grid with a percentage of people sick on day 0
-void initializeGrid(Person** grid, int rows, unsigned int& seed) {
-    int total_population = rows * COLS;
-    int sick_people = static_cast<int>(total_population * ALPHA);
-    int initialized = 0;
+unsigned int customRand(unsigned int& seed) {
+    seed = seed * 1103515245 + 12345;
+    return (seed / 65536) % 32768;
+}
 
-    for (int i = 0; i < rows && initialized < sick_people; ++i) {
-        for (int j = 0; j < COLS && initialized < sick_people; ++j) {
-            seed = simpleRand(seed);
-            if ((seed % 100) < (ALPHA * 100)) {
-                grid[i][j].sick = true;
-                grid[i][j].sick_days = 1;
-                initialized++;
-            }
-        }
+void initializeLocalGrid(Person* localGrid, int localRows, int totalRows, int rank, int numProcs) {
+    int64_t totalPeople = static_cast<int64_t>(gridHeight) * gridWidth;  // Use int64_t to prevent overflow
+    int64_t infectedCount = static_cast<int64_t>(alpha * totalPeople);
+    unsigned int seed = 123456789 + rank;
+
+    // Calculate global row range for this process
+    int startRow = rank * (totalRows / numProcs);
+    int endRow = (rank == numProcs - 1) ? totalRows : (rank + 1) * (totalRows / numProcs);
+    localRows = endRow - startRow;
+
+    // Initialize infected individuals
+    int64_t localInfectedCount = infectedCount / numProcs;
+    if (rank == 0) localInfectedCount += infectedCount % numProcs;
+
+    for (int64_t count = 0; count < localInfectedCount; ++count) {
+        int64_t idx;
+        do {
+            idx = customRand(seed) % (static_cast<int64_t>(localRows) * gridWidth);
+        } while (localGrid[idx].state & 0x10000); // Check if already infected using higher bit
+
+        localGrid[idx].state = 0x10001; // Set infected flag (bit 16) and sick_days=1
     }
 }
 
-// Simulate one day of infection spread and recovery
-void simulateDay(Person** grid, Person** next_grid, int start_row, int end_row, unsigned int& seed) {
-    for (int i = start_row; i < end_row; ++i) {
-        for (int j = 0; j < COLS; ++j) {
-            next_grid[i][j] = grid[i][j];
+void updateLocalGrid(Person* localGrid, Person* newLocalGrid, int localRows,
+    Person* topRow, Person* bottomRow, int rank, int numProcs) {
+    // Create a custom MPI datatype for Person
+    MPI_Datatype person_type;
+    MPI_Type_contiguous(sizeof(Person), MPI_BYTE, &person_type);
+    MPI_Type_commit(&person_type);
 
-            if (grid[i][j].sick) {
-                next_grid[i][j].sick_days++;
-                if (next_grid[i][j].sick_days > OMEGA) {
-                    next_grid[i][j].sick = false;
-                    next_grid[i][j].recovered = true;
-                    next_grid[i][j].sick_days = 0;
+    // Exchange boundary data with neighbors
+    int topNeighbor = (rank == 0) ? MPI_PROC_NULL : rank - 1;
+    int bottomNeighbor = (rank == numProcs - 1) ? MPI_PROC_NULL : rank + 1;
+
+    MPI_Request requests[4];
+    MPI_Isend(localGrid, gridWidth, person_type, topNeighbor, 0, MPI_COMM_WORLD, &requests[0]);
+    MPI_Isend(localGrid + (localRows - 1) * gridWidth, gridWidth, person_type, bottomNeighbor, 1, MPI_COMM_WORLD, &requests[1]);
+    MPI_Irecv(topRow, gridWidth, person_type, topNeighbor, 1, MPI_COMM_WORLD, &requests[2]);
+    MPI_Irecv(bottomRow, gridWidth, person_type, bottomNeighbor, 0, MPI_COMM_WORLD, &requests[3]);
+
+    // Process middle rows while communication is happening
+    for (int i = 1; i < localRows - 1; ++i) {
+        for (int j = 0; j < gridWidth; ++j) {
+            int64_t idx = static_cast<int64_t>(i) * gridWidth + j;
+            newLocalGrid[idx] = localGrid[idx];
+
+            if (localGrid[idx].state & 0xFFFF) { // Check sick days (lower 16 bits)
+                int sick_days = (localGrid[idx].state & 0xFFFF) + 1;
+                newLocalGrid[idx].state = (sick_days >= omega) ? 0x10000 : (0x10000 | sick_days);
+            }
+            else if (!(localGrid[idx].state & 0x10000)) { // Not previously infected
+                int sickNeighbors = 0;
+                // Check left and right
+                if (j > 0 && (localGrid[idx - 1].state & 0xFFFF)) sickNeighbors++;
+                if (j < gridWidth - 1 && (localGrid[idx + 1].state & 0xFFFF)) sickNeighbors++;
+                // Check above and below
+                if (i > 0 && (localGrid[idx - gridWidth].state & 0xFFFF)) sickNeighbors++;
+                if (i < localRows - 1 && (localGrid[idx + gridWidth].state & 0xFFFF)) sickNeighbors++;
+
+                unsigned int seed = 123456789 + rank + i * gridWidth + j;
+                if (customRand(seed) % 1000 < beta * sickNeighbors * 1000.0) {
+                    newLocalGrid[idx].state = 0x10001;
                 }
             }
-            else if (!grid[i][j].recovered) {
-                int neighbors_sick = 0;
-                if (i > 0 && grid[i - 1][j].sick) neighbors_sick++;
-                if (i < ROWS - 1 && grid[i + 1][j].sick) neighbors_sick++;
-                if (j > 0 && grid[i][j - 1].sick) neighbors_sick++;
-                if (j < COLS - 1 && grid[i][j + 1].sick) neighbors_sick++;
+        }
+    }
 
-                seed = simpleRand(seed);
-                if (neighbors_sick > 0 && (seed % 100) < (BETA * 100)) {
-                    next_grid[i][j].sick = true;
-                    next_grid[i][j].sick_days = 1;
+    MPI_Waitall(4, requests, MPI_STATUSES_IGNORE);
+    MPI_Type_free(&person_type);
+
+    // Process boundary rows
+    if (localRows > 1) {
+        for (int i = 0; i < localRows; i += localRows - 1) {
+            for (int j = 0; j < gridWidth; ++j) {
+                int64_t idx = static_cast<int64_t>(i) * gridWidth + j;
+                newLocalGrid[idx] = localGrid[idx];
+
+                if (localGrid[idx].state & 0xFFFF) {
+                    int sick_days = (localGrid[idx].state & 0xFFFF) + 1;
+                    newLocalGrid[idx].state = (sick_days >= omega) ? 0x10000 : (0x10000 | sick_days);
+                }
+                else if (!(localGrid[idx].state & 0x10000)) {
+                    int sickNeighbors = 0;
+
+                    if (j > 0 && (localGrid[idx - 1].state & 0xFFFF)) sickNeighbors++;
+                    if (j < gridWidth - 1 && (localGrid[idx + 1].state & 0xFFFF)) sickNeighbors++;
+
+                    if (i == 0) {
+                        if (rank > 0 && (topRow[j].state & 0xFFFF)) sickNeighbors++;
+                        if ((localGrid[idx + gridWidth].state & 0xFFFF)) sickNeighbors++;
+                    }
+                    else {
+                        if ((localGrid[idx - gridWidth].state & 0xFFFF)) sickNeighbors++;
+                        if (rank < numProcs - 1 && (bottomRow[j].state & 0xFFFF)) sickNeighbors++;
+                    }
+
+                    unsigned int seed = 123456789 + rank + i * gridWidth + j;
+                    if (customRand(seed) % 1000 < beta * sickNeighbors * 1000.0) {
+                        newLocalGrid[idx].state = 0x10001;
+                    }
                 }
             }
         }
     }
-
-    for (int i = start_row; i < end_row; ++i)
-        for (int j = 0; j < COLS; ++j)
-            grid[i][j] = next_grid[i][j];
 }
 
-// Store and output results at the end of the simulation
-void outputResults(Person*** results) {
-    std::ofstream file("flu_simulation_output.txt");
-    for (int day = 0; day <= SIMULATION_DAYS; ++day) {
-        file << "Day " << day << ":\n";
-        for (int i = 0; i < ROWS; ++i) {
-            for (int j = 0; j < COLS; ++j) {
-                file << (results[day][i][j].sick ? "1 " : "0 ");
-            }
-            file << "\n";
+void writeGridToFile(std::ofstream& file, const Person* grid, int rows, int cols) {
+    char* buffer = new char[cols * 2 + 2];
+
+    for (int i = 0; i < rows; ++i) {
+        int pos = 0;
+        for (int j = 0; j < cols; ++j) {
+            buffer[pos++] = (grid[i * cols + j].state & 0xFFFF) ? '1' : '0';
+            buffer[pos++] = ' ';
         }
-        file << "\n";
+        buffer[pos++] = '\n';
+        buffer[pos] = '\0';
+        file.write(buffer, pos);
     }
-    file.close();
+
+    delete[] buffer;
 }
 
 int main(int argc, char* argv[]) {
     MPI_Init(&argc, &argv);
 
-    int rank, size;
+    int rank, numProcs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
 
     if (rank == 0) {
-        if (!readSettings("settings.txt")) {
-            MPI_Abort(MPI_COMM_WORLD, 1);
-            return 1;
-        }
+        readSettingsFromFile("settings.txt");
     }
 
-    // Broadcast parameters to all processes
-    MPI_Bcast(&ROWS, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&COLS, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&ALPHA, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&BETA, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&OMEGA, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&SIMULATION_DAYS, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&gridHeight, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&gridWidth, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&alpha, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&beta, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&omega, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&numDays, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    int rows_per_proc = ROWS / size;
-    int remainder_rows = ROWS % size;
-    int start_row = rank * rows_per_proc + (rank < remainder_rows ? rank : remainder_rows);
-    int end_row = start_row + rows_per_proc + (rank < remainder_rows ? 1 : 0);
-
-    unsigned int seed = rank + 1;
-
-    double start_time = MPI_Wtime();
-
-    // Allocate grid and next_grid
-    Person** grid = new Person * [ROWS];
-    Person** next_grid = new Person * [ROWS];
-    for (int i = 0; i < ROWS; ++i) {
-        grid[i] = new Person[COLS];
-        next_grid[i] = new Person[COLS];
+    int localRows = std::max(1, gridHeight / numProcs);
+    if (rank == numProcs - 1) {
+        localRows = gridHeight - (numProcs - 1) * localRows;
     }
 
+    Person* localGrid = new Person[(localRows + 2) * gridWidth];
+    Person* newLocalGrid = new Person[(localRows + 2) * gridWidth];
+    Person* topRow = new Person[gridWidth];
+    Person* bottomRow = new Person[gridWidth];
+
+    initializeLocalGrid(localGrid + gridWidth, localRows, gridHeight, rank, numProcs);
+
+    // Create a custom MPI datatype for Person
+    MPI_Datatype person_type;
+    MPI_Type_contiguous(sizeof(Person), MPI_BYTE, &person_type);
+    MPI_Type_commit(&person_type);
+
+    std::ofstream outFile;
     if (rank == 0) {
-        initializeGrid(grid, ROWS, seed);
+        outFile.open("flu_simulation.txt", std::ios::trunc);
+        outFile << "Day 0:\n";
+        writeGridToFile(outFile, localGrid + gridWidth, localRows, gridWidth);
+
+        Person* recvBuffer = new Person[gridWidth * (gridHeight / numProcs + 2)];
+        for (int p = 1; p < numProcs; ++p) {
+            int rowsToReceive = (p == numProcs - 1) ?
+                gridHeight - (numProcs - 1) * (gridHeight / numProcs) :
+                gridHeight / numProcs;
+
+            MPI_Recv(recvBuffer, rowsToReceive * gridWidth, person_type, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            writeGridToFile(outFile, recvBuffer, rowsToReceive, gridWidth);
+        }
+        delete[] recvBuffer;
+    }
+    else {
+        MPI_Send(localGrid + gridWidth, localRows * gridWidth, person_type, 0, 0, MPI_COMM_WORLD);
     }
 
-    // Broadcast initial grid to all processes
-    for (int i = 0; i < ROWS; ++i) {
-        MPI_Bcast(grid[i], COLS * sizeof(Person), MPI_BYTE, 0, MPI_COMM_WORLD);
-    }
+    double startTime = MPI_Wtime();
 
-    Person*** results = nullptr;
-    if (rank == 0) {
-        results = new Person * *[SIMULATION_DAYS + 1];
-        for (int day = 0; day <= SIMULATION_DAYS; ++day) {
-            results[day] = new Person * [ROWS];
-            for (int i = 0; i < ROWS; ++i) {
-                results[day][i] = new Person[COLS];
-            }
-        }
-
-        for (int i = 0; i < ROWS; ++i)
-            for (int j = 0; j < COLS; ++j)
-                results[0][i][j] = grid[i][j];
-    }
-
-    for (int day = 1; day <= SIMULATION_DAYS; ++day) {
-        if (rank > 0) {
-            MPI_Sendrecv(grid[start_row], COLS * sizeof(Person), MPI_BYTE, rank - 1, 0,
-                grid[start_row - 1], COLS * sizeof(Person), MPI_BYTE, rank - 1, 0,
-                MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        }
-        if (rank < size - 1) {
-            MPI_Sendrecv(grid[end_row - 1], COLS * sizeof(Person), MPI_BYTE, rank + 1, 0,
-                grid[end_row], COLS * sizeof(Person), MPI_BYTE, rank + 1, 0,
-                MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        }
-
-        simulateDay(grid, next_grid, start_row, end_row, seed);
+    for (int day = 1; day <= numDays; ++day) {
+        updateLocalGrid(localGrid + gridWidth, newLocalGrid + gridWidth, localRows, topRow, bottomRow, rank, numProcs);
 
         if (rank == 0) {
-            for (int i = 0; i < ROWS; ++i)
-                for (int j = 0; j < COLS; ++j)
-                    results[day][i][j] = grid[i][j];
+            outFile << "Day " << day << ":\n";
+            writeGridToFile(outFile, newLocalGrid + gridWidth, localRows, gridWidth);
+
+            Person* recvBuffer = new Person[gridWidth * (gridHeight / numProcs + 2)];
+            for (int p = 1; p < numProcs; ++p) {
+                int rowsToReceive = (p == numProcs - 1) ?
+                    gridHeight - (numProcs - 1) * (gridHeight / numProcs) :
+                    gridHeight / numProcs;
+
+                MPI_Recv(recvBuffer, rowsToReceive * gridWidth, person_type, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                writeGridToFile(outFile, recvBuffer, rowsToReceive, gridWidth);
+            }
+            delete[] recvBuffer;
+        }
+        else {
+            MPI_Send(newLocalGrid + gridWidth, localRows * gridWidth, person_type, 0, 0, MPI_COMM_WORLD);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        std::swap(localGrid, newLocalGrid);
     }
 
-    double end_time = MPI_Wtime();
-    double elapsed_time = end_time - start_time;
-
-    // Reduce timing to find maximum elapsed time
-    double max_time;
-    MPI_Reduce(&elapsed_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Type_free(&person_type);
 
     if (rank == 0) {
-        outputResults(results);
-        std::cout << "Maximum simulation time across all processes: " << max_time << " seconds.\n";
-
-        for (int day = 0; day <= SIMULATION_DAYS; ++day) {
-            for (int i = 0; i < ROWS; ++i) {
-                delete[] results[day][i];
-            }
-            delete[] results[day];
-        }
-        delete[] results;
+        outFile.close();
+        double endTime = MPI_Wtime();
+        std::cout << "Simulation completed in: " << (endTime - startTime) << " seconds." << std::endl;
     }
 
-    for (int i = 0; i < ROWS; ++i) {
-        delete[] grid[i];
-        delete[] next_grid[i];
-    }
-    delete[] grid;
-    delete[] next_grid;
+    delete[] localGrid;
+    delete[] newLocalGrid;
+    delete[] topRow;
+    delete[] bottomRow;
 
     MPI_Finalize();
-
     return 0;
 }

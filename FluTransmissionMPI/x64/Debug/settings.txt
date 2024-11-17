@@ -1,6 +1,6 @@
-ROWS: 300
-COLUMNS: 300
-ALPHA: 0.1
-BETA: 0.3
-OMEGA: 3
-SIMULATION_DAYS: 20
+gridHeight: 10
+gridWidth: 10
+alpha: 0.1
+beta: 1
+omega: 1
+numDays: 15
